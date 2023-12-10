@@ -255,8 +255,9 @@ content-type: text/html; charset=UTF-8
 
 This subdomain hosts a website for Ouija Dev and contains the projects that are currently under development. One of this projects it named API, and there are references to two files that we can use the HRS vulnerability to view. 
 
+## api.js
+
 ```javascript
-#api.
 var app = express();
 var crt = require('crypto');
 var b85 = require('base85');
@@ -336,3 +337,36 @@ app.get("/file/get",(q,r,n) => {
 app.get("/file/upload", (q,r,n) =>{r.json({"message":"Disabled for security reasons"});});
 app.get("/*", (q,r,n) => {r.json("200 not found , redirect to .");});
 ```
+
+`app.js` contains the source code of a Node.js application listening on port 3000. It defines:
+- **Functions:**
+    - `d(b)`: decodes a base64-encoded string, converts it to UTF-8, and then decodes it again from hex.
+    - `generate_cookies(identification)`: generates a SHA256 hash from a secret key and an identification parameter.
+    - `verify_cookies(identification, rhash)`: checks if a given hash matches the hash generated from the provided identification. If they match, it returns 0; otherwise, it returns 1.
+    - `ensure_auth(q, r)`: checks if required headers (ihash and identification) are present in the request, and verifies user privileges by checking the existence of ":admin::True" in the identification header.
+- **Routes:**
+    -  `/login`, `/register`, `/file/upload`: Respond with a message indicating that the functionality is disabled.
+    -  `/users`: Requires authentication and responds with a message indicating that the database is unavailable.
+    -  `/file/get`: Requires authentication and allows reading a file (with some security checks).
+    -  `/*`: A catch-all route responding with a message indicating a 200 status (OK) and suggesting a redirect to "." (presumably the root).
+
+## init.sh
+
+```bash
+
+#!/bin/bash
+
+echo "$(date) api config starts" >>
+mkdir -p .config/bin .config/local .config/share /var/log/zapi
+export k=$(cat /opt/auth/api.key)
+export botauth_id="bot1:bot"
+export hash="4b22a0418847a51650623a458acc1bba5c01f6521ea6135872b9f15b56b988c1"
+ln -s /proc .config/bin/process_informations
+echo "$(date) api config done" >> /var/log/zapi/api.log
+
+exit 1
+```
+
+`init.sh` is an initalization script that sets up an API configuration. It sets two environment variables - `k` (an api key) and `botauth_id` (credentials to be used for identification), and another environment variable that resembles an SHA265 hash. `k`, `botauth_id` are likely to be input to the `generate_cookie` function in `app.js`, and `hash` is its output. Essentially, `hash = sha256(key||botauth_id)`. We can use this in a Hash Length Extension attack to create a hash that gives us admin privileges - `sha256(key||botauth_id||::admin:True)`.
+
+# STEP 5 - Hash Length Extension Attack
