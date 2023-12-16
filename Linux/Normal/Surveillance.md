@@ -59,7 +59,7 @@ Once we got the reverse shell, we will run the following command in order to upg
 python3 -c "import pty; pty.spawn('/bin/bash')"
 ```
 
-# Enumerating the Target Machine
+# Enumerating the Target Machine and Getting the User Flag
 Because we have a fully functional shell, we can use linpeas to enumerate the machine. To so we will:
 1. Download [linpeas.sh](https://linpeas.sh/) to our attack machine.
 2. Start a python webserver on our attack machine: `sudo python3 -m http.server 80`.
@@ -181,6 +181,7 @@ id
 uid=1001(zoneminder) gid=1001(zoneminder) groups=1001(zoneminder)
 ```
 
+# Privilege Escalation
 After upgrading the shell using `python3 -c "import pty; pty.spawn('/bin/bash')"` and running `sudo -l` we found that this user can run all the Perl files that begin with "zm" in the `/usr/bin` directory.
 
 ```bash
